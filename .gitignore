@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 模型 & 数据（你必须忽略！！！）
+*.pth
+*.pt
+*.tar
+*.ckpt
+*.npz
+*.npy
+
+# 数据集路径
+/mnt/
+/data/
+/datasets/
+
+# 日志
+logs/
+runs/
+*.log
+
+# 环境
+.env
+*.env
+.venv/
+env/
+
+# 其他
+*.so
+.DS_Store

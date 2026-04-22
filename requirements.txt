@@ -1,0 +1,13 @@
+# Recommend Python 3.10–3.12 for open3d wheels.
+numpy
+scipy
+pyyaml
+tqdm
+matplotlib
+open3d>=0.17
+opencv-python-headless
+trimesh
+transforms3d
+autolab_core
+pytest
+torch

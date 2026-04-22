@@ -1,0 +1,7 @@
+# Optional: NVIDIA cuRobo for dataset trajectory generation (TrajConfig.use_curobo).
+# Requires: Ubuntu 20.04/22.04, NVIDIA GPU (Volta+), CUDA 11.8+ matching PyTorch, Python 3.8–3.10.
+#
+#   git clone https://github.com/NVlabs/curobo.git
+#   cd curobo && pip install -e . --no-build-isolation
+#
+# See https://curobo.org/get_started/1_install_instructions.html

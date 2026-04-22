@@ -1,0 +1,12 @@
+# Trajectory policy training (scripts/train_lift3d_gc6d.py)
+# Use with: --config this_file --data-root <dir> (index = data-root/index/index_name)
+data_root: /mnt/ssd/ziyaochen/gc6d_lift3d_traj_data
+index_name: index_train.jsonl
+epochs: 20
+batch_size: 32
+lr: 0.001
+output_ckpt: null
+weights:
+  imitation: 1.0
+  goal: 0.5
+  gripper: 0.2
