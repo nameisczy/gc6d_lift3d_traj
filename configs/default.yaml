@@ -31,7 +31,7 @@ trajectory:
   gripper_open: 1.0
   gripper_closed: 0.0
   # cuRobo motion generation (requires CUDA + pip install -e https://github.com/NVlabs/curobo)
-  use_curobo: false
+  use_curobo: true
   curobo_robot: franka.yml
   curobo_scene: collision_table.yml
   curobo_verbose: true

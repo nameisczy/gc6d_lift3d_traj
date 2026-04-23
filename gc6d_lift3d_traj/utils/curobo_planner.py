@@ -156,6 +156,8 @@ def plan_trajectory(
         q_start_pos = sol_ok[0].reshape(-1)
 
         js_start = JointState.from_position(q_start_pos.unsqueeze(0), joint_names=planner.joint_names)
+        # cuRobo FK expects active joint ordering; normalize before planning/FK.
+        js_start = planner.kinematics.get_active_js(js_start)
 
         result = planner.plan_pose(goal_end, js_start, max_attempts=5, enable_graph_attempt=1)
         if result is None or not bool(result.success.any()):
@@ -178,6 +180,7 @@ def plan_trajectory(
             if q.ndim == 1:
                 q = q.unsqueeze(0)
             js_i = JointState.from_position(q, joint_names=js_i.joint_names)
+            js_i = planner.kinematics.get_active_js(js_i)
             kin = planner.compute_kinematics(js_i)
             tp = kin.tool_poses.get_link_pose(frame)
             pos = tp.position[0].detach().cpu().numpy().astype(np.float32).reshape(3)
