@@ -17,6 +17,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from gc6d_lift3d_traj.lift3d_integration.lift3d_dataset import Lift3DTrajDataset
+from gc6d_lift3d_traj.lift3d_integration.lift3d_encoder_ckpt import apply_lift3d_encoder_checkpoint, log_encoder_load
 from gc6d_lift3d_traj.lift3d_integration.lift3d_eval_adapter import evaluate_step_errors
 from gc6d_lift3d_traj.lift3d_integration.trajectory_policy import TrajectoryPolicy
 from gc6d_lift3d_traj.utils.action10_to_gc6d17 import DEFAULT_DEPTH, DEFAULT_HEIGHT, action10_to_gc6d17
@@ -233,6 +234,8 @@ def main():
         ckpt = torch.load(ckpt_path, map_location="cpu")
     sd = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     model = TrajectoryPolicy(robot_state_dim=1).to(device)
+    enc_report = apply_lift3d_encoder_checkpoint(model, map_location=device)
+    log_encoder_load("[model]", enc_report)
     model.load_state_dict(sd, strict=True)
     model.eval()
 

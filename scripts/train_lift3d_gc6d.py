@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from gc6d_lift3d_traj.lift3d_integration.lift3d_dataset import Lift3DTrajDataset
+from gc6d_lift3d_traj.lift3d_integration.lift3d_encoder_ckpt import apply_lift3d_encoder_checkpoint, log_encoder_load
 from gc6d_lift3d_traj.lift3d_integration.lift3d_train_adapter import LossWeights, compute_trajectory_losses
 from gc6d_lift3d_traj.lift3d_integration.trajectory_policy import TrajectoryPolicy
 
@@ -76,6 +77,8 @@ def main():
     dl = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=0, drop_last=False)
 
     model = TrajectoryPolicy(robot_state_dim=1).to(device)
+    enc_report = apply_lift3d_encoder_checkpoint(model, map_location=device)
+    log_encoder_load("[model]", enc_report)
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     weights = LossWeights(imitation=w_imit, goal=w_goal, gripper=w_grip)
 
