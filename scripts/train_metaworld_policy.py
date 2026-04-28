@@ -126,7 +126,7 @@ def main() -> None:
             if args.policy_type == "mlp":
                 pred4 = model(rob7)
             else:
-                pc = torch.zeros(B, 1024, 3, device=device, dtype=rob7.dtype)
+                pc = batch["point_clouds"].to(device)
                 ee_p, ee_r, grip, g10 = robot7_to_trajectory_policy_inputs(rob7)
                 pred4, _pred_goal = model(pc, ee_p, ee_r, grip, g10)
             loss = mse(pred4, y)

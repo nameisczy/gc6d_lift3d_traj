@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -11,6 +12,11 @@ from torch.utils.data import Dataset
 
 from gc6d_lift3d_traj.utils.gc6d_rgb import rgb_png_path
 from gc6d_lift3d_traj.utils.grasp_action10 import grasp_matrix_width_to_action10
+from gc6d_lift3d_traj.gc6d_pointcloud import (
+    load_gc6d_pointcloud_from_api,
+    sample_pointcloud as sample_point_cloud,
+    validate_point_cloud,
+)
 
 FIXED_PC_POINTS = 1024
 
@@ -43,19 +49,6 @@ def load_rgb_tensor(path: Path, image_size: int) -> torch.Tensor:
     return t
 
 
-def sample_point_cloud(pc: np.ndarray, num_points: int = FIXED_PC_POINTS) -> np.ndarray:
-    """Down/up-sample point cloud to fixed length for batched DataLoader stacking."""
-    pc = np.asarray(pc, dtype=np.float32)
-    if pc.ndim != 2 or pc.shape[1] != 3:
-        raise ValueError(f"point_cloud must be (N, 3), got {pc.shape}")
-    n = pc.shape[0]
-    if n >= num_points:
-        idx = np.random.choice(n, num_points, replace=False)
-    else:
-        idx = np.random.choice(n, num_points, replace=True)
-    return pc[idx]
-
-
 class Lift3DTrajDataset(Dataset):
     """
     Per-step trajectory samples from generated episodes.
@@ -65,13 +58,41 @@ class Lift3DTrajDataset(Dataset):
       - goal_action10: (10,) GT grasp in Lift3D 10D format (for goal loss)
     """
 
-    def __init__(self, index_jsonl: str):
+    def __init__(
+        self,
+        index_jsonl: str,
+        *,
+        use_real_pointcloud: bool = True,
+        reload_pointcloud_from_api: bool = False,
+        gc6d_root: Optional[str] = None,
+        gc6d_api_root: Optional[str] = None,
+        dataset_split: str = "train",
+        default_camera: str = "realsense-d415",
+    ):
         self.index_path = Path(index_jsonl)
         self.rows: List[dict] = []
         with self.index_path.open("r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     self.rows.append(json.loads(line))
+
+        self._use_real = use_real_pointcloud
+        self._reload = reload_pointcloud_from_api
+        self._gc6d_root = Path(gc6d_root).resolve() if gc6d_root else None
+        if gc6d_api_root:
+            os.environ["GC6D_API_ROOT"] = str(Path(gc6d_api_root).resolve())
+        self._split = dataset_split
+        self.default_camera = default_camera
+        if self._reload and not self._gc6d_root:
+            raise ValueError("reload_pointcloud_from_api=True requires gc6d_root")
+        if not use_real_pointcloud and os.environ.get("GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD", "").lower() not in (
+            "1",
+            "true",
+            "yes",
+        ):
+            raise ValueError(
+                "use_real_pointcloud=False is only allowed for debug with env GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD=1"
+            )
 
         self.flat: List[Tuple[int, int]] = []
         self._cache: Dict[int, Any] = {}
@@ -99,6 +120,8 @@ class Lift3DTrajDataset(Dataset):
     def __getitem__(self, idx: int):
         epi_id, t = self.flat[idx]
         data = self._get_episode(epi_id)
+        row = self.episode_row(epi_id)
+        scene_id, ann_id, camera = _scene_ann_camera_from_npz_and_row(data, row, self.default_camera)
         gt_w = float(np.asarray(data["gt_grasp_width"]).reshape(-1)[0])
         R = np.asarray(data["gt_grasp_rotation"], dtype=np.float32).reshape(3, 3)
         c = np.asarray(data["gt_grasp_center"], dtype=np.float32).reshape(3)
@@ -109,7 +132,18 @@ class Lift3DTrajDataset(Dataset):
         dg = np.asarray(data["actions_gripper"][t], dtype=np.float32).reshape(1)
         delta10 = np.concatenate([dpos, drot, dg], axis=0).astype(np.float32)
 
-        pc = sample_point_cloud(data["point_cloud"], num_points=FIXED_PC_POINTS)
+        if self._reload and self._gc6d_root is not None:
+            pc_full = load_gc6d_pointcloud_from_api(
+                scene_id, ann_id, camera, gc6d_root=self._gc6d_root, split=self._split
+            )
+        elif not self._use_real:
+            ii = np.arange(500, dtype=np.float32)[:, None]
+            pc_full = np.concatenate([ii * 1e-4, (ii + 1) * 1e-4, (ii + 2) * 1e-4], axis=1)
+        else:
+            pc_full = np.asarray(data["point_cloud"], dtype=np.float32)
+        if self._use_real:
+            validate_point_cloud(pc_full, name="episode[point_cloud]")
+        pc = sample_point_cloud(pc_full, num_points=FIXED_PC_POINTS)
         assert pc.shape == (FIXED_PC_POINTS, 3), pc.shape
 
         state = {
@@ -127,7 +161,7 @@ class Lift3DTrajDatasetLift3DStyle(Dataset):
     """
     Same as Lift3DTrajDataset but returns Lift3D-style sample dict with required fields:
     {
-      images: (3, H, H) float RGB [0,1] from GC6D scene rgb/{img_id}.png,
+      images: (3, H, H) float RGB [0, 1] from GC6D scene rgb/{img_id}.png,
       point_clouds: (1024,3),
       robot_states: (10,) = [x,y,z,rot6d,gripper],
       raw_states: (10,) same as robot_states,
@@ -144,8 +178,9 @@ class Lift3DTrajDatasetLift3DStyle(Dataset):
         *,
         default_camera: str = "realsense-d415",
         image_size: int = 224,
+        **kwargs: Any,
     ):
-        self._inner = Lift3DTrajDataset(index_jsonl)
+        self._inner = Lift3DTrajDataset(index_jsonl, default_camera=default_camera, **kwargs)
         self.gc6d_root = Path(gc6d_root)
         self.default_camera = default_camera
         self.image_size = int(image_size)

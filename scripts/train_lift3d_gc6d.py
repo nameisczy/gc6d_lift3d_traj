@@ -106,7 +106,19 @@ def main():
         out_path = str(Path(index_path).parent.parent / "metadata" / "traj_policy.pt")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ds = Lift3DTrajDataset(index_path)
+    paths = cfg.get("paths") or {}
+    ds_block = cfg.get("dataset") or {}
+    gc6d_root = paths.get("gc6d_root")
+    gc6d_api = paths.get("gc6d_api_root")
+    ds = Lift3DTrajDataset(
+        index_path,
+        use_real_pointcloud=bool(ds_block.get("use_real_pointcloud", True)),
+        reload_pointcloud_from_api=bool(ds_block.get("reload_pointcloud_from_api", False)),
+        gc6d_root=gc6d_root,
+        gc6d_api_root=gc6d_api,
+        dataset_split=str(ds_block.get("split", "train")),
+        default_camera=str(ds_block.get("camera", "realsense-d415")),
+    )
     if len(ds) == 0:
         raise RuntimeError(f"No samples in index: {index_path}")
     n_episode_rows = len(ds.rows)

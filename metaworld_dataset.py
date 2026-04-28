@@ -1,12 +1,12 @@
 """
-Minimal torch Dataset for MetaWorld .npz collected by ``scripts/metaworld_collect_data.py``.
+MetaWorld .npz from ``scripts/metaworld_collect_data.py`` (v2: real point clouds via LIFT3D).
 
-``robot_states`` is a 7D vector: hand(3) + goal_pos(3) + gripper(1) from the full 39D obs
-(see ``metaworld_state``). ``action`` is 4D (no padding to 10).
+``robot_states`` is 7D: hand(3) + goal_pos(3) + gripper(1). ``action`` is 4D.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict, Union
 
@@ -16,17 +16,40 @@ from torch.utils.data import Dataset
 
 from metaworld_state import metaworld_raw39_to_robot7_np, MW_ACTION_DIM, MW_OBS_FULL_DIM, MW_ROBOT7_DIM
 
+_DATASET_V2 = 2
+_DEBUG_DUMMY = os.environ.get("GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
+def _validate_pc_tensor(t: torch.Tensor) -> None:
+    if t.shape != (1024, 3):
+        raise ValueError(f"point_clouds must be (1024,3), got {tuple(t.shape)}")
+    a = t.numpy()
+    if not np.isfinite(a).all():
+        raise ValueError("point_clouds has non-finite values")
+    if _DEBUG_DUMMY:
+        return
+    if np.allclose(a, 0.0, atol=1e-6):
+        raise ValueError(
+            "point_clouds is all zeros — re-collect with scripts/metaworld_collect_data.py (v2) "
+            "or set GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD=1 for debug only."
+        )
+    if np.linalg.norm(a, axis=1).max() < 1e-5:
+        raise ValueError("point_clouds is degenerate (near-zero norm everywhere)")
+
 
 class MetaWorldPickPlaceDataset(Dataset):
     """
-    Loads ``all_obs`` (39D) and ``all_actions`` (4D) from a compressed .npz.
-
-    Exposes a 7D ``robot_states`` suitable for :func:`metaworld_state.robot7_to_trajectory_policy_inputs`.
+    Loads v2 format with ``all_point_clouds`` (T, 1024, 3) or v1 (raises unless debug env set).
     """
 
-    def __init__(self, npz_path: Union[str, Path], action_dim: int = MW_ACTION_DIM):
+    def __init__(self, npz_path: Union[str, Path], action_dim: int = MW_ACTION_DIM, *, use_real_pointcloud: bool = True):
         path = Path(npz_path)
         d = np.load(path, allow_pickle=True)
+        self._version = int(d["dataset_version"][0]) if "dataset_version" in d.files else 1
         self._obs = d["all_obs"]
         self._act = d["all_actions"]
         if self._obs.shape[0] != self._act.shape[0]:
@@ -37,6 +60,24 @@ class MetaWorldPickPlaceDataset(Dataset):
                 f"expected all_obs last dim {MW_OBS_FULL_DIM} (pick-place-v3), got {self._obs.shape[1]}"
             )
         self._action_dim = int(action_dim)
+        self._use_real = use_real_pointcloud
+
+        if self._use_real and self._version < _DATASET_V2 and "all_point_clouds" not in d.files:
+            raise ValueError(
+                f"Dataset {path} is v1 (no all_point_clouds). Re-collect with:\n"
+                f"  LIFT3D_ROOT=/path/to/LIFT3D python scripts/metaworld_collect_data.py --out {path}\n"
+                "or set use_real_pointcloud=False with GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD=1 (debug only)."
+            )
+        if "all_point_clouds" in d.files:
+            self._pc = np.asarray(d["all_point_clouds"], dtype=np.float32)
+            if self._pc.shape[0] != self._n:
+                raise ValueError("all_point_clouds length must match all_obs")
+            if self._pc.ndim != 3 or self._pc.shape[1:] != (1024, 3):
+                raise ValueError(f"all_point_clouds must be (N, 1024, 3), got {self._pc.shape}")
+        else:
+            if self._use_real and not _DEBUG_DUMMY:
+                raise ValueError("Missing all_point_clouds in npz; re-run metaworld_collect_data.py (v2).")
+            self._pc = None
 
     def __len__(self) -> int:
         return self._n
@@ -54,7 +95,14 @@ class MetaWorldPickPlaceDataset(Dataset):
         robot7 = metaworld_raw39_to_robot7_np(full)
         assert robot7.shape[0] == MW_ROBOT7_DIM
         robot = torch.from_numpy(robot7)
-        point_clouds = torch.zeros(1024, 3, dtype=torch.float32)
+        if self._pc is not None:
+            point_clouds = torch.from_numpy(self._pc[idx].copy())
+        else:
+            if not _DEBUG_DUMMY:
+                raise RuntimeError("Internal error: missing point cloud without v1 debug mode")
+            point_clouds = torch.zeros(1024, 3, dtype=torch.float32)
+        if self._use_real:
+            _validate_pc_tensor(point_clouds)
         action = torch.from_numpy(act)
         return {
             "point_clouds": point_clouds,

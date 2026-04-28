@@ -76,20 +76,28 @@ def _rollout(
     get_action4: Callable[[np.ndarray], np.ndarray],
     tasks: Sequence[object],
     max_steps: int,
+    *,
+    policy_type: str = "mlp",
+    env_ref: "List[object] | None" = None,
 ) -> RolloutStats:
     _, env_cls = _build_metaworld_env()
     rewards: List[float] = []
     lengths: List[int] = []
     successes: List[bool] = []
-
     for task in tasks:
         env = env_cls()
         env.set_task(task)
+        if policy_type == "trajectory" and env_ref is not None:
+            from gc6d_lift3d_traj.metaworld_pointcloud import apply_metaworld_lift3d_render_size
+
+            apply_metaworld_lift3d_render_size(env, 224)
         obs, _ = env.reset()
         ep_r = 0.0
         length = 0
         success = False
         for _t in range(max_steps):
+            if env_ref is not None:
+                env_ref[0] = env
             a4 = get_action4(obs)
             a4 = np.asarray(a4, dtype=np.float32).reshape(-1)[:4]
             obs, r, term, trunc, info = env.step(a4)
@@ -136,6 +144,9 @@ def _debug_first_episodes(
     max_steps: int,
     get_pred4: Callable[[np.ndarray], np.ndarray],
     expert: object,
+    *,
+    policy_type: str = "mlp",
+    env_ref: "List[object] | None" = None,
 ) -> None:
     """
     Roll out by applying **expert** actions so the observation path matches the expert; at each
@@ -148,8 +159,14 @@ def _debug_first_episodes(
     for ep in range(n_run):
         env = env_cls()
         env.set_task(tasks[ep])
+        if policy_type == "trajectory" and env_ref is not None:
+            from gc6d_lift3d_traj.metaworld_pointcloud import apply_metaworld_lift3d_render_size
+
+            apply_metaworld_lift3d_render_size(env, 224)
         obs, _ = env.reset()
         for _t in range(max_steps):
+            if env_ref is not None:
+                env_ref[0] = env
             p = get_pred4(obs)
             p = np.asarray(p, dtype=np.float32).reshape(-1)[:4]
             e = np.asarray(expert.get_action(obs), dtype=np.float32).reshape(-1)[:4]
@@ -176,6 +193,7 @@ def _make_learned_fn(
     policy_type: str,
     model: Union[MetaWorldMLPPolicy, TrajectoryPolicy],
     device: torch.device,
+    env_ref: "List[object] | None",
 ) -> Callable[[np.ndarray], np.ndarray]:
 
     @torch.inference_mode()
@@ -187,9 +205,15 @@ def _make_learned_fn(
 
     @torch.inference_mode()
     def learned_action4_traj(obs: np.ndarray) -> np.ndarray:
+        from gc6d_lift3d_traj.metaworld_pointcloud import point_cloud_from_mujoco_env
+
+        env = env_ref[0] if env_ref else None
+        if env is None:
+            raise RuntimeError("trajectory policy eval requires current mujoco env in env_ref[0]")
+        pc_np = point_cloud_from_mujoco_env(env, camera_name="corner", num_points=1024)
+        pc = torch.from_numpy(pc_np).to(device=device, dtype=torch.float32).unsqueeze(0)
         o1 = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
         r7 = metaworld_raw39_to_robot7_t(o1)
-        pc = torch.zeros(1, 1024, 3, device=device, dtype=torch.float32)
         ee_p, ee_r, grip, g10 = robot7_to_trajectory_policy_inputs(r7)
         pred4, _ = model(pc, ee_p, ee_r, grip, g10)  # type: ignore[operator, misc]
         return pred4.squeeze(0).float().cpu().numpy()
@@ -240,7 +264,8 @@ def main() -> None:
     _load_state_dict(model, ckpt_path, device)
     model.eval()
 
-    learned_action4 = _make_learned_fn(args.policy_type, model, device)
+    env_ref: List[object] = [None]
+    learned_action4 = _make_learned_fn(args.policy_type, model, device, env_ref)
 
     from metaworld.policies import SawyerPickPlaceV3Policy
 
@@ -255,10 +280,21 @@ def main() -> None:
     tasks: List[object] = [mt1.train_tasks[int(rng.integers(0, n_tasks))] for _ in range(args.episodes)]
 
     # Debug: first 3 episodes, pred vs expert at same obs (expert-steered rollout)
-    _debug_first_episodes(3, tasks, args.max_steps, learned_action4, expert_pol)
+    _debug_first_episodes(
+        3, tasks, args.max_steps, learned_action4, expert_pol,
+        policy_type=args.policy_type, env_ref=env_ref if args.policy_type == "trajectory" else None,
+    )
 
-    stats_expert = _rollout(expert_action4, tasks, args.max_steps)
-    stats_learned = _rollout(learned_action4, tasks, args.max_steps)
+    stats_expert = _rollout(
+        expert_action4, tasks, args.max_steps, policy_type="mlp", env_ref=None
+    )
+    stats_learned = _rollout(
+        learned_action4,
+        tasks,
+        args.max_steps,
+        policy_type=args.policy_type,
+        env_ref=env_ref if args.policy_type == "trajectory" else None,
+    )
 
     n = args.episodes
     _print_block(f"Expert: {SawyerPickPlaceV3Policy.__name__}", stats_expert, n)

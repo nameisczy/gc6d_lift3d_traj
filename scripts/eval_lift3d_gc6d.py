@@ -455,7 +455,15 @@ def main():
         )
 
     # --- dataloader step errors (imitation) ---
-    ds = Lift3DTrajDataset(str(index_path))
+    ds = Lift3DTrajDataset(
+        str(index_path),
+        use_real_pointcloud=True,
+        reload_pointcloud_from_api=False,
+        gc6d_root=args.gc6d_root,
+        gc6d_api_root=args.gc6d_api_root,
+        dataset_split="train",
+        default_camera=args.camera,
+    )
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False)
     step_errs = []
     with torch.no_grad():
