@@ -1,0 +1,60 @@
+agent:
+  name: Lift3d_BatchNormMLP
+  instantiate_config:
+    _target_: lift3d.models.PointCloudGuidedBatchNormMLP
+    point_cloud_encoder:
+      _target_: lift3d.models.lift3d.model_loader.lift3d_clip_base
+    policy_hidden_dims:
+    - 256
+    - 256
+    - 256
+    nonlinearity: relu
+    dropout_rate: 0.0
+benchmark:
+  name: MetaWorld
+  dataset_instantiate_config:
+    _target_: lift3d.dataset.MetaWorldDataset
+  evaluator_instantiate_config:
+    _target_: lift3d.envs.MetaWorldEvaluator
+    max_episode_length: 200
+    image_size: ${image_size}
+    camera_name: ${camera_name}
+    use_point_crop: true
+    num_points: 1024
+    point_cloud_camera_names:
+    - ${camera_name}
+  loss_func:
+    _target_: torch.nn.functional.mse_loss
+seed: 0
+device: cuda:0
+task_name: pick-place
+camera_name: corner
+image_size: 224
+project_root: /home/ziyaochen/LIFT3D
+dataset_dir: /home/ziyaochen/LIFT3D/data/metaworld/pick-place_corner.zarr
+dataloader:
+  batch_size: 256
+  num_workers: 0
+  shuffle: true
+  drop_last: true
+  pin_memory: true
+train:
+  clip_grad_value: 0.0
+  learning_rate: 0.001
+  num_epochs: 100
+  scheduler_instantiate_config:
+    _target_: lift3d.helpers.pytorch.Optimizers.get_constant_scheduler
+    lr: ${train.learning_rate}
+evaluation:
+  num_skip_epochs: 0
+  validation_frequency_epochs: 5
+  validation_trajs_num: 50
+  save_best_model: true
+  checkpoint_path: /home/ziyaochen/LIFT3D/outputs/2026-04-27/13-20-11/best_model.pth
+wandb:
+  project: Lift3D
+  group: null
+  name: ${agent.name}_${task_name}_${camera_name}
+  notes: ${task_name}
+  reinit: true
+  mode: online

@@ -1,0 +1,7 @@
+- project_root=/home/ziyaochen/LIFT3D
+- task_name=pick-place
+- camera_name=corner
+- agent=lift3d_bnmlp
+- dataset_dir=/home/ziyaochen/LIFT3D/data/metaworld/pick-place_corner.zarr
+- evaluation.validation_trajs_num=50
+- +evaluation.checkpoint_path=/home/ziyaochen/LIFT3D/outputs/2026-04-27/13-20-11/best_model.pth

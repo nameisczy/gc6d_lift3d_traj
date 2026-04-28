@@ -19,14 +19,41 @@ from torch.utils.data import DataLoader
 from gc6d_lift3d_traj.lift3d_integration.lift3d_dataset import Lift3DTrajDataset
 from gc6d_lift3d_traj.lift3d_integration.lift3d_encoder_ckpt import apply_lift3d_encoder_checkpoint, log_encoder_load
 from gc6d_lift3d_traj.lift3d_integration.lift3d_eval_adapter import evaluate_step_errors
+from gc6d_lift3d_traj.lift3d_integration.official_head_gc6d_policy import OfficialHeadGC6DPolicy
 from gc6d_lift3d_traj.lift3d_integration.trajectory_policy import TrajectoryPolicy
 from gc6d_lift3d_traj.utils.action10_to_gc6d17 import DEFAULT_DEPTH, DEFAULT_HEIGHT, action10_to_gc6d17
 from gc6d_lift3d_traj.utils.grasp_action10 import grasp_matrix_width_to_action10
 from gc6d_lift3d_traj.utils.rotations import lift3d_rotation_to_matrix, matrix_to_lift3d_rotation
 
 # --- GC6D evaluator (optional; heavy deps: open3d, dexnet, etc.) ---
+def _ensure_numpy2_transforms3d_compat() -> None:
+    """
+    transforms3d versions used by graspclutter6dAPI still reference removed NumPy symbols
+    (`np.float`, `np.maximum_sctype`) under NumPy>=2.
+    This shim restores minimal compatibility for import-time usage.
+    """
+    if not hasattr(np, "float"):
+        np.float = float  # type: ignore[attr-defined]
+    if not hasattr(np, "maximum_sctype"):
+        def _maximum_sctype(t):
+            dt = np.dtype(t)
+            if np.issubdtype(dt, np.floating):
+                return np.float64
+            if np.issubdtype(dt, np.complexfloating):
+                return np.complex128
+            if np.issubdtype(dt, np.signedinteger):
+                return np.int64
+            if np.issubdtype(dt, np.unsignedinteger):
+                return np.uint64
+            if np.issubdtype(dt, np.bool_):
+                return np.bool_
+            return dt.type
+        np.maximum_sctype = _maximum_sctype  # type: ignore[attr-defined]
+
+
 def _try_import_gc6d_eval():
     try:
+        _ensure_numpy2_transforms3d_compat()
         from graspclutter6dAPI.grasp import GraspGroup
         from graspclutter6dAPI.graspclutter6d_eval import GraspClutter6DEval
         from graspclutter6dAPI.utils.config import get_config
@@ -209,6 +236,11 @@ def main():
     p.add_argument("--assert-full-coverage", action="store_true", help="Assert num_prediction_files == num_test_images")
     p.add_argument("--verbose", action="store_true", help="Print per-episode metrics")
     p.add_argument("--json-summary", action="store_true", help="Print EVAL_SUMMARY_JSON line for pipeline_validate.py")
+    p.add_argument("--model-type", type=str, choices=("custom_action10", "official_head_adapter"), default="custom_action10")
+    p.add_argument("--init-metaworld-ckpt", type=str, default=None, help="Required for official_head_adapter")
+    p.add_argument("--official-head-init", type=str, choices=("random", "metaworld"), default="metaworld")
+    p.add_argument("--encoder-init", type=str, choices=("lift3d_clip", "random", "metaworld"), default="lift3d_clip")
+    p.add_argument("--head-init", type=str, choices=("random", "metaworld"), default="metaworld")
     args = p.parse_args()
 
     _, index_path, ckpt_path = resolve_paths(args)
@@ -233,10 +265,20 @@ def main():
     except TypeError:
         ckpt = torch.load(ckpt_path, map_location="cpu")
     sd = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
-    model = TrajectoryPolicy(robot_state_dim=1).to(device)
-    enc_report = apply_lift3d_encoder_checkpoint(model, map_location=device)
-    log_encoder_load("[model]", enc_report)
-    model.load_state_dict(sd, strict=True)
+    if args.model_type == "official_head_adapter":
+        model = OfficialHeadGC6DPolicy(
+            metaworld_ckpt=args.init_metaworld_ckpt,
+            official_head_init=args.official_head_init,
+            encoder_init=args.encoder_init,
+            head_init=args.head_init,
+        ).to(device)
+        # finetuned checkpoints for adapter model should match this class
+        model.load_state_dict(sd, strict=True)
+    else:
+        model = TrajectoryPolicy(robot_state_dim=1).to(device)
+        enc_report = apply_lift3d_encoder_checkpoint(model, map_location=device)
+        log_encoder_load("[model]", enc_report)
+        model.load_state_dict(sd, strict=True)
     model.eval()
 
     if args.full_test_inference:
@@ -249,12 +291,14 @@ def main():
         # Do NOT call loadGrasp here (expensive and unnecessary); only load per-image point cloud.
         if args.gc6d_api_root not in sys.path:
             sys.path.insert(0, args.gc6d_api_root)
+        _ensure_numpy2_transforms3d_compat()
         from graspclutter6dAPI.graspclutter6d import GraspClutter6D
 
         api = GraspClutter6D(root=args.gc6d_root, camera=args.camera, split=args.split)
         split_file = Path(args.gc6d_root) / "split_info" / "grasp_test_scene_ids.json"
         scene_ids = [int(x) for x in json.loads(split_file.read_text(encoding="utf-8"))]
         n_files = 0
+        debug_rot_printed = 0
         with torch.no_grad():
             for scene_id in scene_ids:
                 for ann_id in range(13):
@@ -274,24 +318,53 @@ def main():
                     # rollout state0 -> stateT
                     ee_pos = torch.from_numpy(pc_np.mean(axis=0).astype(np.float32)).unsqueeze(0).to(device)
                     ee_rot = torch.from_numpy(np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)).unsqueeze(0).to(device)
+                    ee_rot_init = ee_rot.clone()
                     grip = torch.ones((1, 1), dtype=torch.float32, device=device)
                     goal = torch.zeros((1, 10), dtype=torch.float32, device=device)
+                    rot_source_name = "default_identity6d"
+                    rot_source_6d = ee_rot.clone()
                     for _ in range(args.rollout_steps):
-                        pred_d, pred_g = model(pc, ee_pos, ee_rot, grip, goal)
-                        d = pred_d[0]
-                        ee_pos = ee_pos + d[:3].unsqueeze(0)
-                        R_cur = lift3d_rotation_to_matrix(ee_rot[0].detach().cpu().numpy())
-                        R_del = lift3d_rotation_to_matrix(d[3:9].detach().cpu().numpy())
-                        R_nxt = R_del @ R_cur
-                        ee_rot = torch.from_numpy(matrix_to_lift3d_rotation(R_nxt)).unsqueeze(0).to(device)
-                        grip = grip + d[9:10].reshape(1, 1)
-                        goal = pred_g
+                        if args.model_type == "official_head_adapter":
+                            # action4 = [dxyz(3), dgrip(1)], keep rotation unchanged
+                            a4 = model.gc6d_forward(pc, ee_pos, ee_rot, grip, goal)[0]
+                            ee_pos = ee_pos + a4[:3].unsqueeze(0)
+                            grip = grip + a4[3:4].reshape(1, 1)
+                        else:
+                            pred_d, pred_g = model(pc, ee_pos, ee_rot, grip, goal)
+                            d = pred_d[0]
+                            ee_pos = ee_pos + d[:3].unsqueeze(0)
+                            R_cur = lift3d_rotation_to_matrix(ee_rot[0].detach().cpu().numpy())
+                            R_del = lift3d_rotation_to_matrix(d[3:9].detach().cpu().numpy())
+                            R_nxt = R_del @ R_cur
+                            ee_rot = torch.from_numpy(matrix_to_lift3d_rotation(R_nxt)).unsqueeze(0).to(device)
+                            grip = grip + d[9:10].reshape(1, 1)
+                            goal = pred_g
 
                     final_goal = goal[0].detach().cpu().numpy().astype(np.float32)
                     final_goal[:3] = ee_pos[0].detach().cpu().numpy().astype(np.float32)
                     final_goal[3:9] = ee_rot[0].detach().cpu().numpy().astype(np.float32)
                     final_goal[9] = float(np.clip(abs(final_goal[9]), 0.0, 0.14))
                     row17 = action10_to_gc6d17(final_goal, score=1.0).reshape(1, 17).astype(np.float32)
+
+                    if args.model_type == "official_head_adapter" and debug_rot_printed < 3:
+                        R_init = lift3d_rotation_to_matrix(ee_rot_init[0].detach().cpu().numpy())
+                        R_final = lift3d_rotation_to_matrix(ee_rot[0].detach().cpu().numpy())
+                        R_src = lift3d_rotation_to_matrix(rot_source_6d[0].detach().cpu().numpy())
+                        eq_src = bool(np.allclose(R_final, R_src, atol=1e-6))
+                        print(
+                            "[official_head_adapter][rotation_check] "
+                            f"sample={debug_rot_printed} scene={scene_id} ann={ann_id} "
+                            f"source={rot_source_name} "
+                            f"init(trace={float(np.trace(R_init)):.6f},det={float(np.linalg.det(R_init)):.6f}) "
+                            f"final(trace={float(np.trace(R_final)):.6f},det={float(np.linalg.det(R_final)):.6f}) "
+                            f"final_equals_source={eq_src}"
+                        )
+                        if rot_source_name.startswith("default_"):
+                            print(
+                                "[official_head_adapter][rotation_check][warning] "
+                                "final rotation source is default identity6d, not planned/GT-aligned rotation."
+                            )
+                        debug_rot_printed += 1
 
                     img_id = ann_id_to_img_id(int(ann_id), args.camera)
                     scene_dir = out_root / f"{int(scene_id):06d}" / args.camera
@@ -341,6 +414,10 @@ def main():
             print("EVAL_SUMMARY_JSON:", json.dumps(summary, default=str))
         return summary
 
+    if args.model_type == "official_head_adapter":
+        print("ERROR: --model-type official_head_adapter currently supports --full-test-inference path.")
+        sys.exit(1)
+
     index_rows = []
     with open(index_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -389,8 +466,12 @@ def main():
             grip = state["gripper"].to(device)
             if grip.dim() == 1:
                 grip = grip.unsqueeze(-1)
-            pred_d, pred_g = model(pc, ee_pos, ee_rot, grip, goal10.to(device))
-            pd = pred_d.cpu().numpy()
+            if args.model_type == "official_head_adapter":
+                pred4 = model.gc6d_forward(pc, ee_pos, ee_rot, grip, goal10.to(device))
+                pd = torch.cat([pred4[:, :3], torch.zeros(pred4.size(0), 6, device=pred4.device), pred4[:, 3:4]], dim=-1).cpu().numpy()
+            else:
+                pred_d, pred_g = model(pc, ee_pos, ee_rot, grip, goal10.to(device))
+                pd = pred_d.cpu().numpy()
             tg = target_delta.cpu().numpy()
             step_errs.append(
                 evaluate_step_errors(

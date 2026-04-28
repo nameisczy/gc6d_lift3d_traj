@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -43,8 +43,10 @@ def _normalize_point_cloud_bnm3(pc: torch.Tensor) -> torch.Tensor:
 
 class TrajectoryPolicy(nn.Module):
     """
-    Lift3dCLIP on point cloud (768-D) fused with EE pose + gripper + goal (20-D with robot_state_dim=1),
-    then predicts per-step deltas (3 + 6 + 1) and auxiliary grasp prediction (10D).
+    Lift3dCLIP on point cloud (768-D) fused with EE pose + 6D rotation + gripper + 10D goal
+    (``3+6+robot_state_dim+10`` in the state gate), then predicts action from ``head_delta``
+    (default 10D for GC6D) and optionally a 10D grasp head.
+    Set ``action_out_dim=4`` and ``with_goal_head=False`` for MetaWorld (4D control).
     """
 
     def __init__(
@@ -52,12 +54,16 @@ class TrajectoryPolicy(nn.Module):
         robot_state_dim: int = 1,
         hidden: int = 512,
         *,
+        action_out_dim: int = 10,
+        with_goal_head: bool = True,
         lift3d_root: Path | str | None = None,
         lift3d_clip_ckpt: Path | str | None = None,
     ):
         super().__init__()
         self.robot_state_dim = robot_state_dim
         self.hidden = hidden
+        self.action_out_dim = int(action_out_dim)
+        self.with_goal_head = bool(with_goal_head)
         sg_dim = 3 + 6 + robot_state_dim + 10
         self._sg_dim = sg_dim
 
@@ -114,8 +120,12 @@ class TrajectoryPolicy(nn.Module):
             nn.LayerNorm(hidden),
             nn.ReLU(inplace=True),
         )
-        self.head_delta = nn.Linear(hidden, 10)  # 3 + 6 + 1
-        self.head_goal = nn.Linear(hidden, 10)
+        # BC: "delta" head is the main action (10D for GC6D pose deltas, 4D for MetaWorld, etc.)
+        self.head_delta = nn.Linear(hidden, self.action_out_dim)
+        if self.with_goal_head:
+            self.head_goal = nn.Linear(hidden, 10)
+        else:
+            self.head_goal = None
 
     def forward(
         self,
@@ -124,7 +134,7 @@ class TrajectoryPolicy(nn.Module):
         ee_rotation: torch.Tensor,
         gripper: torch.Tensor,
         goal: torch.Tensor,
-    ):
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # point_cloud: (B, N, 3)
         pc = _normalize_point_cloud_bnm3(point_cloud.float())
         geom = self.pc_encoder(pc)
@@ -135,4 +145,7 @@ class TrajectoryPolicy(nn.Module):
         sg = torch.cat([ee_position, ee_rotation, gripper, goal], dim=-1)
         h = torch.cat([geom, sg], dim=-1)
         h2 = self.fusion_mlp(h)
-        return self.head_delta(h2), self.head_goal(h2)
+        out = self.head_delta(h2)
+        if self.head_goal is not None:
+            return out, self.head_goal(h2)
+        return out, None
