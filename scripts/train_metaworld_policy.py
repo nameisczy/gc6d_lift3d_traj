@@ -4,7 +4,7 @@ MetaWorld pick-place-v3 imitation: 7D state (hand + goal + grip) and 4D action.
 
 State is parsed per MetaWorld spec (see ``metaworld_state``).
 
-- ``--policy-type trajectory`` (default): ``TrajectoryPolicy`` + zero point cloud, frozen ``pc_encoder``.
+- ``--policy-type trajectory`` (default): ``TrajectoryPolicy`` + real point cloud from dataset, frozen ``pc_encoder``.
 - ``--policy-type mlp``: :class:`metaworld_mlp_policy.MetaWorldMLPPolicy` (debug BC baseline).
 
 Run from repo root, with ``gc6d`` (or similar) env that has torch; trajectory mode also needs LIFT3D checkpoint.
@@ -17,6 +17,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -78,13 +79,17 @@ def main() -> None:
         help="State dict path (default depends on --policy-type).",
     )
     args = p.parse_args()
+    if os.environ.get("GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD", "").lower() in ("1", "true", "yes"):
+        raise SystemExit(
+            "GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD is debug-only and forbidden in training scripts."
+        )
     out_path = args.out_ckpt or _default_out_ckpt(args.policy_type)
 
     if not args.npz.is_file():
         raise SystemExit(f"Dataset not found: {args.npz} (run scripts/metaworld_collect_data.py first)")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ds = MetaWorldPickPlaceDataset(args.npz, action_dim=4)
+    ds = MetaWorldPickPlaceDataset(args.npz, action_dim=4, use_real_pointcloud=True)
     if len(ds) < 1:
         raise SystemExit("Empty dataset")
     loader = DataLoader(

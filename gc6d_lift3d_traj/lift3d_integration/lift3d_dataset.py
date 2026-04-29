@@ -85,13 +85,10 @@ class Lift3DTrajDataset(Dataset):
         self.default_camera = default_camera
         if self._reload and not self._gc6d_root:
             raise ValueError("reload_pointcloud_from_api=True requires gc6d_root")
-        if not use_real_pointcloud and os.environ.get("GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD", "").lower() not in (
-            "1",
-            "true",
-            "yes",
-        ):
+        if not use_real_pointcloud:
             raise ValueError(
-                "use_real_pointcloud=False is only allowed for debug with env GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD=1"
+                "use_real_pointcloud=False is forbidden in this dataset class. "
+                "Training must use real GC6D point clouds."
             )
 
         self.flat: List[Tuple[int, int]] = []
@@ -136,13 +133,9 @@ class Lift3DTrajDataset(Dataset):
             pc_full = load_gc6d_pointcloud_from_api(
                 scene_id, ann_id, camera, gc6d_root=self._gc6d_root, split=self._split
             )
-        elif not self._use_real:
-            ii = np.arange(500, dtype=np.float32)[:, None]
-            pc_full = np.concatenate([ii * 1e-4, (ii + 1) * 1e-4, (ii + 2) * 1e-4], axis=1)
         else:
             pc_full = np.asarray(data["point_cloud"], dtype=np.float32)
-        if self._use_real:
-            validate_point_cloud(pc_full, name="episode[point_cloud]")
+        validate_point_cloud(pc_full, name="episode[point_cloud]")
         pc = sample_point_cloud(pc_full, num_points=FIXED_PC_POINTS)
         assert pc.shape == (FIXED_PC_POINTS, 3), pc.shape
 

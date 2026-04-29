@@ -6,7 +6,6 @@ MetaWorld .npz from ``scripts/metaworld_collect_data.py`` (v2: real point clouds
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Dict, Union
 
@@ -17,11 +16,6 @@ from torch.utils.data import Dataset
 from metaworld_state import metaworld_raw39_to_robot7_np, MW_ACTION_DIM, MW_OBS_FULL_DIM, MW_ROBOT7_DIM
 
 _DATASET_V2 = 2
-_DEBUG_DUMMY = os.environ.get("GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD", "").lower() in (
-    "1",
-    "true",
-    "yes",
-)
 
 
 def _validate_pc_tensor(t: torch.Tensor) -> None:
@@ -30,12 +24,9 @@ def _validate_pc_tensor(t: torch.Tensor) -> None:
     a = t.numpy()
     if not np.isfinite(a).all():
         raise ValueError("point_clouds has non-finite values")
-    if _DEBUG_DUMMY:
-        return
     if np.allclose(a, 0.0, atol=1e-6):
         raise ValueError(
-            "point_clouds is all zeros — re-collect with scripts/metaworld_collect_data.py (v2) "
-            "or set GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD=1 for debug only."
+            "point_clouds is all zeros — re-collect with scripts/metaworld_collect_data.py (v2)."
         )
     if np.linalg.norm(a, axis=1).max() < 1e-5:
         raise ValueError("point_clouds is degenerate (near-zero norm everywhere)")
@@ -43,7 +34,7 @@ def _validate_pc_tensor(t: torch.Tensor) -> None:
 
 class MetaWorldPickPlaceDataset(Dataset):
     """
-    Loads v2 format with ``all_point_clouds`` (T, 1024, 3) or v1 (raises unless debug env set).
+    Loads v2 format with ``all_point_clouds`` (T, 1024, 3).
     """
 
     def __init__(self, npz_path: Union[str, Path], action_dim: int = MW_ACTION_DIM, *, use_real_pointcloud: bool = True):
@@ -61,12 +52,17 @@ class MetaWorldPickPlaceDataset(Dataset):
             )
         self._action_dim = int(action_dim)
         self._use_real = use_real_pointcloud
+        if not self._use_real:
+            raise ValueError(
+                "use_real_pointcloud=False is forbidden for MetaWorld training dataset. "
+                "Please collect real point clouds with scripts/metaworld_collect_data.py."
+            )
 
         if self._use_real and self._version < _DATASET_V2 and "all_point_clouds" not in d.files:
             raise ValueError(
                 f"Dataset {path} is v1 (no all_point_clouds). Re-collect with:\n"
                 f"  LIFT3D_ROOT=/path/to/LIFT3D python scripts/metaworld_collect_data.py --out {path}\n"
-                "or set use_real_pointcloud=False with GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD=1 (debug only)."
+                "and keep use_real_pointcloud=True."
             )
         if "all_point_clouds" in d.files:
             self._pc = np.asarray(d["all_point_clouds"], dtype=np.float32)
@@ -75,9 +71,7 @@ class MetaWorldPickPlaceDataset(Dataset):
             if self._pc.ndim != 3 or self._pc.shape[1:] != (1024, 3):
                 raise ValueError(f"all_point_clouds must be (N, 1024, 3), got {self._pc.shape}")
         else:
-            if self._use_real and not _DEBUG_DUMMY:
-                raise ValueError("Missing all_point_clouds in npz; re-run metaworld_collect_data.py (v2).")
-            self._pc = None
+            raise ValueError("Missing all_point_clouds in npz; re-run metaworld_collect_data.py (v2).")
 
     def __len__(self) -> int:
         return self._n
@@ -95,14 +89,8 @@ class MetaWorldPickPlaceDataset(Dataset):
         robot7 = metaworld_raw39_to_robot7_np(full)
         assert robot7.shape[0] == MW_ROBOT7_DIM
         robot = torch.from_numpy(robot7)
-        if self._pc is not None:
-            point_clouds = torch.from_numpy(self._pc[idx].copy())
-        else:
-            if not _DEBUG_DUMMY:
-                raise RuntimeError("Internal error: missing point cloud without v1 debug mode")
-            point_clouds = torch.zeros(1024, 3, dtype=torch.float32)
-        if self._use_real:
-            _validate_pc_tensor(point_clouds)
+        point_clouds = torch.from_numpy(self._pc[idx].copy())
+        _validate_pc_tensor(point_clouds)
         action = torch.from_numpy(act)
         return {
             "point_clouds": point_clouds,

@@ -12,7 +12,9 @@ class CollisionConfig:
     table_z: float = 0.0
     table_tolerance: float = 0.005
     point_contact_threshold: float = 0.005
-    max_points_in_boxes: int = 25
+    max_points_in_boxes: int = 800
+    max_collision_ratio: float | None = 0.01
+    verbose: bool = False
 
 
 def _points_in_obb(points: np.ndarray, center: np.ndarray, R: np.ndarray, size: np.ndarray) -> np.ndarray:
@@ -35,13 +37,34 @@ def check_pointcloud_box_collision(
 ) -> bool:
     pc = np.asarray(point_cloud, dtype=np.float32)[:, :3]
     gripper_cfg = gripper_cfg or ParallelJawConfig()
-    for p, R in zip(positions, rotations):
+    total_points = int(pc.shape[0])
+    for pose_idx, (p, R) in enumerate(zip(positions, rotations)):
         obbs = build_gripper_obbs(p, R, grasp_width=grasp_width, cfg=gripper_cfg)
         hit_count = 0
-        for obb in obbs:
+        trigger_obb_idx = None
+        for obb_idx, obb in enumerate(obbs):
             mask = _points_in_obb(pc, obb.center, obb.rotation, obb.size)
-            hit_count += int(mask.sum())
-        if hit_count > cfg.max_points_in_boxes:
+            obb_hits = int(mask.sum())
+            hit_count += obb_hits
+            if obb_hits > 0:
+                trigger_obb_idx = obb_idx
+        collision_ratio = hit_count / max(total_points, 1)
+        by_count = hit_count > cfg.max_points_in_boxes
+        by_ratio = (
+            cfg.max_collision_ratio is not None
+            and collision_ratio > float(cfg.max_collision_ratio)
+        )
+        if cfg.verbose:
+            print(
+                "[collision] "
+                f"pose_idx={pose_idx} "
+                f"hit_count={hit_count} "
+                f"total_points={total_points} "
+                f"collision_ratio={collision_ratio:.6f} "
+                f"trigger_obb_idx={trigger_obb_idx} "
+                f"by_count={by_count} by_ratio={by_ratio}"
+            )
+        if by_count or by_ratio:
             return True
     return False
 

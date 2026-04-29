@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -63,6 +64,10 @@ def main():
         help="Load {'model': state_dict} (or raw state_dict) after arch init, before training (staged finetune).",
     )
     args = p.parse_args()
+    if os.environ.get("GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD", "").lower() in ("1", "true", "yes"):
+        raise SystemExit(
+            "GC6D_DEBUG_ALLOW_DUMMY_POINTCLOUD is a debug-only flag and is forbidden in training scripts."
+        )
     if args.stage is None:
         phase_to_stage = {"A": "adapter", "B": "adapter_head", "C": "adapter_head_encoder"}
         args.stage = phase_to_stage.get(args.phase, "adapter")
@@ -110,9 +115,11 @@ def main():
     ds_block = cfg.get("dataset") or {}
     gc6d_root = paths.get("gc6d_root")
     gc6d_api = paths.get("gc6d_api_root")
+    if bool(ds_block.get("use_real_pointcloud", True)) is not True:
+        raise SystemExit("dataset.use_real_pointcloud must be true for training.")
     ds = Lift3DTrajDataset(
         index_path,
-        use_real_pointcloud=bool(ds_block.get("use_real_pointcloud", True)),
+        use_real_pointcloud=True,
         reload_pointcloud_from_api=bool(ds_block.get("reload_pointcloud_from_api", False)),
         gc6d_root=gc6d_root,
         gc6d_api_root=gc6d_api,
